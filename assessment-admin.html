@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>メンタルスキル診断 — 管理画面</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300&family=Noto Sans JP:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, collection, getDocs, orderBy, query, where }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyByUItwob4nyagm_WRgyhkEmJ2xNxYrYRc",
+  authDomain: "peak-self.firebaseapp.com",
+  projectId: "peak-self",
+  storageBucket: "peak-self.firebasestorage.app",
+  messagingSenderId: "58858314342",
+  appId: "1:58858314342:web:4c3a0d3ea03561f9322ba7"
+};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const ADMIN_EMAIL = 'coachfeaturing@gmail.com';
+
+onAuthStateChanged(auth, user => {
+  if(user && user.email === ADMIN_EMAIL){
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('adminScreen').style.display = 'block';
+    document.getElementById('adminUserEmail').textContent = user.email;
+    document.getElementById('adminUserAvatar').src = user.photoURL || '';
+    loadData();
+  } else if(user) {
+    document.getElementById('loginScreen').innerHTML = '<div style="text-align:center;padding:80px 24px;color:#c06060;font-size:14px">このページへのアクセス権限がありません。<br><br><button onclick="adminLogout()" style="background:none;border:1px solid #c06060;color:#c06060;padding:10px 24px;border-radius:20px;cursor:pointer;font-size:12px">ログアウト</button></div>';
+  } else {
+    document.getElementById('loginScreen').style.display = 'flex';
+    document.getElementById('adminScreen').style.display = 'none';
+  }
+});
+
+window.adminLogin = async () => {
+  try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch(e){ console.error(e); }
+};
+window.adminLogout = async () => { await signOut(auth); };
+
+let allRecords = [];
+let growthCharts = {};
+
+async function loadData(){
+  document.getElementById('loadingMsg').style.display = 'block';
+  document.getElementById('recordsWrap').innerHTML = '';
+  try {
+    const snap = await getDocs(query(collection(db,'assessments'), orderBy('savedAt','desc')));
+    allRecords = snap.docs.map(d => ({id: d.id, ...d.data()}));
+    renderSummary();
+    renderRecords(allRecords);
+  } catch(e){ console.error(e); alert('読み込みエラー: '+e.message); }
+  document.getElementById('loadingMsg').style.display = 'none';
+}
+window.loadData = loadData;
+
+function renderSummary(){
+  document.getElementById('totalCount').textContent = allRecords.length;
+  const names = [...new Set(allRecords.map(r=>r.userName).filter(Boolean))];
+  document.getElementById('uniqueUsers').textContent = names.length;
+  const avg = allRecords.length ? Math.round(allRecords.reduce((a,r)=>a+(r.total||0),0)/allRecords.length) : 0;
+  document.getElementById('avgScore').textContent = avg;
+}
+
+function renderRecords(records){
+  const wrap = document.getElementById('recordsWrap');
+  wrap.innerHTML = '';
+  if(!records.length){
+    wrap.innerHTML = '<p style="text-align:center;color:#6b6358;padding:40px;letter-spacing:2px;font-size:12px">データがまだありません</p>';
+    return;
+  }
+
+  // Group by userName for growth chart
+  const byName = {};
+  records.forEach(r => {
+    const key = r.userName || '(名前なし)';
+    if(!byName[key]) byName[key] = [];
+    byName[key].push(r);
+  });
+
+  // Render each record card
+  records.forEach((r,idx) => {
+    const total = r.total || 0;
+    const pct = Math.round(total/240*100);
+    const rankColor = pct>=85?'#7aab8a':pct>=70?'#c9a96e':pct>=55?'#d4935a':'#c06060';
+    const rank = pct>=85?'ELITE':pct>=70?'ADVANCED':pct>=55?'DEVELOPING':pct>=40?'BUILDING':'BEGINNER';
+    const date = r.diagDate || (r.savedAt?.toDate?.()?.toLocaleDateString('ja-JP') || '—');
+
+    const card = document.createElement('div');
+    card.className = 'rec-card';
+    card.innerHTML = `
+      <div class="rec-header">
+        <div class="rec-left">
+          <div class="rec-name">${r.userName||'(名前なし)'}</div>
+          <div class="rec-meta">
+            ${r.userSport?`<span class="meta-tag">⚽ ${r.userSport}</span>`:''}
+            ${r.coachName?`<span class="meta-tag">👤 ${r.coachName}</span>`:''}
+            <span class="meta-tag">📅 ${date}</span>
+          </div>
+        </div>
+        <div class="rec-score-wrap">
+          <div class="rec-total" style="color:${rankColor}">${total}</div>
+          <div class="rec-total-den">/240</div>
+          <div class="rec-rank" style="border-color:${rankColor};color:${rankColor}">${rank}</div>
+        </div>
+      </div>
+
+      <div class="rec-cats">
+        ${(r.categoryScores||[]).map(c=>`
+          <div class="rec-cat">
+            <div class="rec-cat-name">${c.name}</div>
+            <div class="rec-cat-bar-track"><div class="rec-cat-bar" style="width:${c.score/10*100}%;background:${scoreColor(c.score)}"></div></div>
+            <div class="rec-cat-score" style="color:${scoreColor(c.score)}">${c.score.toFixed(1)}</div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div class="rec-chart-wrap">
+        <canvas id="radarMini${idx}" height="220"></canvas>
+      </div>
+
+      <button class="rec-detail-btn" onclick="toggleDetail('detail${idx}')">▼ 全回答を見る</button>
+      <div class="rec-detail" id="detail${idx}" style="display:none">
+        ${(r.answers||[]).map((v,i)=>`
+          <div class="rec-ans-row">
+            <span class="rec-ans-num">Q${i+1}</span>
+            <span class="rec-ans-text">${QUESTIONS[i]}</span>
+            <span class="rec-ans-score" style="color:${v>=8?'#7aab8a':v>=5?'#c9a96e':'#c06060'}">${v}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    wrap.appendChild(card);
+
+    // Mini radar
+    setTimeout(()=>{
+      const ctx = document.getElementById('radarMini'+idx);
+      if(!ctx) return;
+      new Chart(ctx, {
+        type:'radar',
+        data:{
+          labels:(r.categoryScores||[]).map(c=>c.name),
+          datasets:[{
+            data:(r.categoryScores||[]).map(c=>c.score),
+            backgroundColor:'rgba(201,169,110,0.1)',
+            borderColor:'rgba(201,169,110,0.65)',
+            pointBackgroundColor:'#c9a96e',
+            pointBorderColor:'#0f0e0d',
+            pointRadius:4,borderWidth:1.5,
+          }]
+        },
+        options:{
+          responsive:true,maintainAspectRatio:false,
+          scales:{r:{min:0,max:10,
+            ticks:{display:false},
+            grid:{color:'rgba(46,43,38,.6)'},
+            angleLines:{color:'rgba(46,43,38,.6)'},
+            pointLabels:{color:'#a89f90',font:{size:9}}
+          }},
+          plugins:{legend:{display:false}}
+        }
+      });
+    },100);
+  });
+
+  // Growth chart for users with multiple records
+  Object.entries(byName).forEach(([name, recs]) => {
+    if(recs.length < 2) return;
+    const sorted = [...recs].reverse();
+    const wrap2 = document.createElement('div');
+    wrap2.className = 'growth-card';
+    wrap2.innerHTML = `
+      <div class="card-title">📈 ${name} の成長推移</div>
+      <div style="position:relative;height:200px"><canvas id="growthChart_${name.replace(/\s/g,'')}"></canvas></div>
+    `;
+    wrap.prepend(wrap2);
+    setTimeout(()=>{
+      const ctx = document.getElementById('growthChart_'+name.replace(/\s/g,''));
+      if(!ctx) return;
+      new Chart(ctx,{
+        type:'line',
+        data:{
+          labels: sorted.map(r=>r.diagDate||'—'),
+          datasets:[{
+            label:'総合スコア',
+            data: sorted.map(r=>r.total||0),
+            borderColor:'#c9a96e',backgroundColor:'rgba(201,169,110,0.1)',
+            pointBackgroundColor:'#c9a96e',pointRadius:6,borderWidth:2,tension:.3,
+          }]
+        },
+        options:{
+          responsive:true,maintainAspectRatio:false,
+          scales:{
+            y:{min:0,max:240,ticks:{color:'rgba(107,99,88,.8)',font:{size:10}},grid:{color:'rgba(46,43,38,.5)'}},
+            x:{ticks:{color:'rgba(107,99,88,.8)',font:{size:10}},grid:{display:false}}
+          },
+          plugins:{legend:{display:false}}
+        }
+      });
+    },150);
+  });
+}
+
+function scoreColor(v){ return v>=8?'#7aab8a':v>=5?'#c9a96e':'#c06060'; }
+window.toggleDetail = (id) => {
+  const el = document.getElementById(id);
+  const btn = el.previousElementSibling;
+  if(el.style.display==='none'){el.style.display='block';btn.textContent='▲ 全回答を閉じる';}
+  else{el.style.display='none';btn.textContent='▼ 全回答を見る';}
+};
+
+// Search / Filter
+window.filterRecords = () => {
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  const filtered = allRecords.filter(r =>
+    (r.userName||'').toLowerCase().includes(q) ||
+    (r.userSport||'').toLowerCase().includes(q) ||
+    (r.coachName||'').toLowerCase().includes(q)
+  );
+  renderRecords(filtered);
+};
+
+// Export CSV
+window.exportCSV = () => {
+  const cats = ['セルフトーク','問題解決力','目標設定','自己基盤','行動力','成長マインドセット','グリット','モチベーション','セルフイメージ','ゾーンスキル','チームワーク能力','フォーカス'];
+  const header = ['氏名','競技名','担当コーチ','診断日','総合スコア',...cats].join(',');
+  const rows = allRecords.map(r => {
+    const catVals = cats.map(name => {
+      const c = (r.categoryScores||[]).find(x=>x.name===name);
+      return c ? c.score.toFixed(1) : '';
+    });
+    return [r.userName||'',r.userSport||'',r.coachName||'',r.diagDate||'',r.total||'',...catVals].join(',');
+  });
+  const csv = [header,...rows].join('\n');
+  const blob = new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='mental-skill-assessment.csv'; a.click();
+};
+
+const QUESTIONS = [
+  'ネガティブになってもセルフトークで前向きな気持ちに変えられる',
+  '自分のやる気や成長が向上する効果的な目標設定ができている',
+  '未来や過去、評価にとらわれずに目の前にフォーカスすることができる',
+  '部屋や道具、書類、連絡など常に整理整頓できている',
+  '自分や他者のアイディアを行動に移すことが得意だ',
+  'やると決めた行動を粘り強く継続することができる',
+  '自分の課題に対して、どんな能力や行動が必要かをいつも明確にしている',
+  '難しい状況でこそ、「自分の最大値」を発揮することに挑戦している',
+  '感謝心、貢献心を常に最大限、自分の心に持つ事ができている',
+  '自分のモチベーションの源泉（コアバリュー）が明確である',
+  '自分は夢や目標を達成できる人間だと自信を持って言える',
+  '誰に対しても自分の考えや意見を明確に伝え、聞くことができる',
+  '自分の実力を発揮できる条件を知っている',
+  '強い相手に対しても最後まで自分のプレーをやり抜くことができる',
+  '自分を自分で磨き、成長させる能力に自信がある',
+  '試合や練習での行動目標を明確にしてプレーできている',
+  'ミスの後やプレッシャーがかかる場面でのワンプレーに集中できる',
+  '苦手な事も上達するために何が必要か具体的に考え、行動できる',
+  '高い目標や困難な課題に対しても行動を継続できる',
+  '常時、自分を良い状態へモチベート（動機付け）することができる',
+  '周りの人を励ます声掛けやアドバイスをすることができる',
+  'ミスやプレッシャー時にセルフトークで冷静になれる',
+  '自分なら必ず目標を達成できると心の底から思えている',
+  '試合で自分がゾーンに入るアプローチをすることができる',
+];
+</script>
+<style>
+:root{--bg:#0f0e0d;--bg2:#161513;--bg3:#1d1b18;--card:#1a1916;--border:#2e2b26;--border2:#3a3630;--gold:#c9a96e;--gold2:#e8c98a;--gold-dim:rgba(201,169,110,0.10);--gold-glow:rgba(201,169,110,0.22);--text:#e8e2d8;--text2:#a89f90;--text3:#6b6358;--green:#7aab8a;--red:#c06060;--amber:#d4935a;--radius:12px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:'Noto Sans JP',sans-serif;font-weight:300;min-height:100vh}
+
+/* LOGIN */
+#loginScreen{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:40px 24px;text-align:center}
+.login-brand{font-family:'Cormorant Garamond',serif;font-size:10px;letter-spacing:7px;color:var(--gold);margin-bottom:14px;opacity:.8}
+.login-title{font-family:'Cormorant Garamond',serif;font-size:clamp(24px,4vw,40px);font-weight:300;color:var(--text);margin-bottom:6px}
+.login-title em{font-style:italic;color:var(--gold2)}
+.login-sub{font-size:11px;color:var(--text3);letter-spacing:3px;margin-bottom:40px}
+.google-btn{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--border2);color:var(--text);font-family:'Noto Sans JP',sans-serif;font-size:14px;padding:14px 28px;border-radius:40px;cursor:pointer;transition:all .3s;letter-spacing:1px;margin:0 auto}
+.google-btn:hover{border-color:var(--gold);background:var(--gold-dim)}
+.google-icon{width:20px;height:20px}
+#adminScreen{display:none}
+
+/* HEADER */
+.admin-header{background:var(--card);border-bottom:1px solid var(--border);padding:16px 28px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.admin-header-left{display:flex;align-items:center;gap:14px}
+.admin-logo{font-family:'Cormorant Garamond',serif;font-size:20px;color:var(--gold2);letter-spacing:2px}
+.admin-badge{font-size:10px;letter-spacing:2px;color:var(--text3);border:1px solid var(--border);border-radius:10px;padding:2px 10px}
+.admin-header-right{display:flex;align-items:center;gap:10px}
+.admin-avatar{width:28px;height:28px;border-radius:50%;border:1px solid var(--border2)}
+.admin-email{font-size:11px;color:var(--text3)}
+.logout-btn{background:none;border:1px solid var(--border);color:var(--text3);font-size:10px;letter-spacing:2px;padding:5px 14px;border-radius:20px;cursor:pointer;transition:all .2s;font-family:'Noto Sans JP',sans-serif}
+.logout-btn:hover{border-color:var(--gold);color:var(--gold)}
+
+/* MAIN */
+.admin-main{max-width:1000px;margin:0 auto;padding:28px 24px 80px}
+
+/* SUMMARY */
+.summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px}
+.sum-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;text-align:center}
+.sum-num{font-family:'Cormorant Garamond',serif;font-size:44px;color:var(--gold2);font-weight:300;line-height:1}
+.sum-label{font-size:10px;color:var(--text3);letter-spacing:2px;margin-top:4px}
+
+/* TOOLBAR */
+.toolbar{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+.search-input{flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'Noto Sans JP',sans-serif;font-size:13px;padding:10px 14px;outline:none;transition:border-color .2s}
+.search-input:focus{border-color:var(--gold)}
+.tool-btn{background:transparent;border:1px solid var(--border);color:var(--text3);font-family:'Noto Sans JP',sans-serif;font-size:11px;letter-spacing:2px;padding:10px 18px;border-radius:20px;cursor:pointer;transition:all .2s;white-space:nowrap}
+.tool-btn:hover{border-color:var(--gold);color:var(--gold2)}
+.tool-btn.primary{border-color:var(--gold);color:var(--gold2)}
+
+/* RECORD CARD */
+.rec-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:16px}
+.rec-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;gap:12px}
+.rec-name{font-size:16px;font-weight:400;color:var(--text);margin-bottom:6px}
+.rec-meta{display:flex;flex-wrap:wrap;gap:6px}
+.meta-tag{font-size:10px;color:var(--text3);background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:2px 10px;letter-spacing:.5px}
+.rec-score-wrap{text-align:right;flex-shrink:0}
+.rec-total{font-family:'Cormorant Garamond',serif;font-size:40px;font-weight:300;line-height:1}
+.rec-total-den{font-size:10px;color:var(--text3);letter-spacing:1px}
+.rec-rank{display:inline-block;font-size:9px;letter-spacing:2px;padding:3px 10px;border-radius:10px;border:1px solid;margin-top:4px}
+.rec-cats{display:grid;gap:6px;margin-bottom:16px}
+.rec-cat{display:grid;grid-template-columns:130px 1fr 40px;gap:8px;align-items:center}
+.rec-cat-name{font-size:11px;color:var(--text3);letter-spacing:.5px}
+.rec-cat-bar-track{height:4px;background:var(--border2);border-radius:2px;overflow:hidden}
+.rec-cat-bar{height:100%;border-radius:2px;transition:width .8s ease}
+.rec-cat-score{font-family:'Cormorant Garamond',serif;font-size:15px;text-align:right}
+.rec-chart-wrap{height:220px;margin-bottom:12px}
+.rec-detail-btn{background:none;border:none;color:var(--text3);font-size:11px;letter-spacing:2px;cursor:pointer;padding:6px 0;font-family:'Noto Sans JP',sans-serif;transition:color .2s}
+.rec-detail-btn:hover{color:var(--gold)}
+.rec-detail{margin-top:12px;display:grid;gap:6px}
+.rec-ans-row{display:grid;grid-template-columns:32px 1fr 28px;gap:8px;align-items:center;padding:8px 12px;background:var(--bg3);border-radius:6px}
+.rec-ans-num{font-size:10px;color:var(--text3);text-align:center}
+.rec-ans-text{font-size:11px;color:var(--text2);line-height:1.5}
+.rec-ans-score{font-family:'Cormorant Garamond',serif;font-size:18px;text-align:right}
+
+/* GROWTH CARD */
+.growth-card{background:var(--card);border:1px solid rgba(201,169,110,.2);border-radius:var(--radius);padding:24px;margin-bottom:16px}
+.card-title{font-family:'Cormorant Garamond',serif;font-size:16px;color:var(--gold);letter-spacing:1px;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.card-title::before{content:'';width:3px;height:16px;background:var(--gold);border-radius:2px}
+
+#loadingMsg{display:none;text-align:center;color:var(--text3);font-size:12px;letter-spacing:2px;padding:32px}
+
+@media(max-width:600px){
+  .summary-grid{grid-template-columns:repeat(3,1fr)}
+  .rec-cat{grid-template-columns:100px 1fr 32px}
+  .rec-header{flex-direction:column}
+}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginScreen">
+  <div class="login-brand">ADMIN PANEL</div>
+  <h1 class="login-title">メンタルスキル診断<br><em>管理画面</em></h1>
+  <p class="login-sub">COACH DASHBOARD</p>
+  <button class="google-btn" onclick="adminLogin()">
+    <svg class="google-icon" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+    Googleアカウントでログイン
+  </button>
+</div>
+
+<!-- ADMIN -->
+<div id="adminScreen">
+  <div class="admin-header">
+    <div class="admin-header-left">
+      <div class="admin-logo">MENTAL SKILL</div>
+      <div class="admin-badge">COACH DASHBOARD</div>
+    </div>
+    <div class="admin-header-right">
+      <img class="admin-avatar" id="adminUserAvatar" src="" alt="">
+      <span class="admin-email" id="adminUserEmail"></span>
+      <button class="logout-btn" onclick="adminLogout()">ログアウト</button>
+    </div>
+  </div>
+
+  <div class="admin-main">
+    <div class="summary-grid">
+      <div class="sum-card"><div class="sum-num" id="totalCount">—</div><div class="sum-label">総診断数</div></div>
+      <div class="sum-card"><div class="sum-num" id="uniqueUsers">—</div><div class="sum-label">ユニークユーザー</div></div>
+      <div class="sum-card"><div class="sum-num" id="avgScore">—</div><div class="sum-label">平均スコア</div></div>
+    </div>
+
+    <div class="toolbar">
+      <input class="search-input" id="searchInput" placeholder="氏名・競技名・コーチ名で検索..." oninput="filterRecords()">
+      <button class="tool-btn primary" onclick="loadData()">🔄 再読み込み</button>
+      <button class="tool-btn" onclick="exportCSV()">⬇ CSV出力</button>
+    </div>
+
+    <div id="loadingMsg">読み込み中...</div>
+    <div id="recordsWrap"></div>
+  </div>
+</div>
+
+</body>
+</html>
